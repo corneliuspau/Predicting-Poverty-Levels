@@ -1,0 +1,710 @@
+---
+title: "PSTAT 131 F21 Final Project"
+author: "Mino Han (3490612), Cornelius Pau (3883196)"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r setup, echo=FALSE, message = FALSE, warning = FALSE}
+library(knitr)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(ISLR)
+library(ROCR)
+library(reshape2)
+library(maps)
+library(dendextend)
+library(glmnet)
+library(tree)
+library(maptree)
+library(randomForest)
+library(gbm)
+library(GGally)
+library(factoextra)
+library(cluster)
+library(class)
+
+# set global chunk options: images will be 7x5 inches
+knitr::opts_chunk$set(echo=TRUE,
+                      cache=FALSE,
+                      fig.width=7, 
+                      fig.height=5,
+                      fig.align='center')
+options(digits = 4)
+
+#setwd('~/School/Fall2021/PSTAT131/Final')
+
+```
+
+```{r prompt code, echo = FALSE, message = FALSE, warning = FALSE}
+state.name <- c(state.name, "District of Columbia")
+state.abb <- c(state.abb, "DC")
+## read in census data
+census <- read_csv("./acs2017_county_data.csv") %>% select(-CountyId, -ChildPoverty, -Income, -IncomeErr, -IncomePerCap, -IncomePerCapErr) %>%
+  mutate(State = state.abb[match(`State`, state.name)]) %>%
+  filter(State != "PR")
+
+
+education <- read_csv("./education.csv") %>%
+  filter(!is.na(`2003 Rural-urban Continuum Code`)) %>%
+  filter(State != "PR") %>%
+  select(-`FIPS Code`,
+         -`2003 Rural-urban Continuum Code`,
+         -`2003 Urban Influence Code`,
+         -`2013 Rural-urban Continuum Code`,
+         -`2013 Urban Influence Code`) %>%
+  rename(County = `Area name`)
+```
+
+# Preliminary Data Analysis
+
+### 1. (1 pts) Report the dimension of census. (1 pts) Are there missing values in the data set? (1 pts) Compute the total number of distinct values in State in census to verify that the data contains all states and a federal district.
+```{r,eval=FALSE}
+dim(census)
+sum(is.na(census)) #number of "True" is.na()
+```
+```{r, eval=FALSE}
+length(unique(census$State))
+```
+The *census* dataset is one with 3142 rows and 31 columns. Each row represents a county in the United States, and the columns represent demographic and economic statistics about the residents of the county. Attributes such as race/ethnicity, sector/type of employment, and gender makeup are some of the variables represented in the columns.
+
+*census* contains no missing values, and contains 51 unique state names corresponding to the 50 states in the US and one unincorporated federal district.
+
+
+### 2. (1 pts) Report the dimension of education. (1 pts) How many distinct counties contain missing values in the data set? (1 pts) Compute the total number of distinct values in County in education. (1 pts) Compare the values of total number of distinct county in education with that in census. (1 pts) Comment on your findings.
+
+```{r, eval=FALSE}
+dim(education)
+sum(!complete.cases(education)) #number of "True" is.na()'s
+
+length(unique(education$County))
+length(unique(census$County))
+```
+The *education* dataset has 3143 rows and 42 columns. Each row contains information for a single county and the columns of the dataset reflect educational attainment statistics for adults age 25 and older in the county.We find that 18 counties in the dataset contain missing values and that there are 1877 unique counties in the dataset. This corresponds well with 1877 unique counties in the *census* dataset. With 1877 unique counties in both datasets, it seems reasonable for us to join the data together for each county and list the educational data with the census data.
+
+
+
+# Data Wrangling
+
+### 3. (2 pts) Remove all NA values in education, if there is any.
+```{r}
+education <- na.omit(education)
+```
+### 4. (2 pts) In education, in addition to State and County, we will start only on the following 4 features: Less than a high school diploma, 2015-19, High school diploma only, 2015-19, Some college or associate's degree, 2015-19, and Bachelor's degree or higher, 2015-19. Mutate the education dataset by selecting these 6 features only, and create a new feature which is the total population of that county.
+```{r}
+education = education %>%
+  select(`State`,
+         `County`,                    
+         `Less than a high school diploma, 2015-19`,
+         `High school diploma only, 2015-19`,
+         `Some college or associate's degree, 2015-19`,
+         `Bachelor's degree or higher, 2015-19`) %>%
+  mutate(TotalPopulation = rowSums(.[3:6], na.rm=TRUE))
+```
+### 5. (3 pts) Construct aggregated data sets from education data: i.e., create a state-level summary into a dataset named education.state.
+```{r}
+education.state <- education %>%
+  group_by(State) %>%
+  summarize(`LessHSDiploma`=sum(`Less than a high school diploma, 2015-19`),
+            `HSDiploma`=sum(`High school diploma only, 2015-19`),
+            `SomeDegree`=sum(`Some college or associate's degree, 2015-19`),
+            `Bachelors`=sum(`Bachelor's degree or higher, 2015-19`))
+
+head(education.state)
+
+```
+### 6. (4 pts) Create a data set named state.level on the basis of education.state, where you create a new feature which is the name of the education degree level with the largest population in that state.
+```{r}
+state.level <- education.state %>%
+  mutate(`TotalPopulation` = names(education.state[,-1])[max.col(education.state[,-1], "last")])
+
+state.level
+```
+# Visualization
+
+```{r vis map code, warning = FALSE, echo = FALSE}
+states <- map_data("state")
+
+ggplot(data = states) + 
+  geom_polygon(aes(x = long, y = lat, fill = region, group = group),
+               color = "white") + 
+  coord_fixed(1.3) +
+  guides(fill=FALSE)  # color legend is unnecessary for this example and takes too long
+
+```
+
+### 7. (6 pts) Now color the map (on the state level) by the education level with highest population for each state. Show the plot legend.
+```{r}
+states <- states %>%
+  mutate(region = tools::toTitleCase(region)) %>%
+  mutate(region = state.abb[match(region, state.name)])
+
+ggplot(data = left_join(states, state.level, by=c("region" = "State"))) + 
+  geom_polygon(aes(x = long, y = lat, fill = `TotalPopulation`, group = group), color = "white") + coord_fixed(1.3)
+```
+### 8. (6 pts) (Open-ended) Create a visualization of your choice using census data.
+```{r, warning = FALSE}
+ggcorr(census %>% select(-State,-County), title="Correlation Matrix")
+```
+Based on the correlation matrix, Voting Age Citizen and Employed, as well as Poverty and Unemployment seem to be highly correlated which makes sense; A citizen has to be at least 21 years old in order to vote, and the chances that they would be employed would be high since most people over 21 years old would be out of college. On the other hand, places with higher levels of poverty could very well mean there is a higher level of unemployment in that specific area. 
+
+In addition, when comparing correlation between Races and Poverty, we can see that there is a big contrast between White and the other minorities; White is negatively correlated with Poverty, indicating that the chances of a White American to be in poverty is more unlikely compared to Native and Black Americans, who both have a positive correlation with poverty. The same trends are observed with unemployment, with White Americans being negatively correlated and Black/Native Americans positively correlated. It is noted that Asian Americans and Hispanics tend to be in the middle ground, leaning towards a negative correlation and positive correlation respectively with both Poverty and Unemployment. Among the different racial groups, Asian Americans are more likely to be employed in the Professional industry, netting the highest correlation, while White Americans are more unlikely to be in the Service industry. 
+Between those two industries, they seem to have the biggest correlations with Unemployment; the Professional sector is negatively correlated with Unemployment indicating that people working in the Professional sector are less likely to not have a job, whereas it is the opposite with the Service sector as people working in that industry would have a higher chance of being unemployed.   
+
+Another interesting observation is that TotalPop, Men, and Women are all perfectly collineared. We will need to remove one of the columns in the future to avoid poor estimation and fitting of our models.  
+
+### 9. The census data contains county-level census information. In this problem, we clean and aggregate the information as follows. Start with census, filter out any rows with missing values, convert {Men, Employed, VotingAgeCitizen} attributes to percentages, compute Minority attribute by combining {Hispanic, Black, Native, Asian, Pacific}, remove these variables after creating Minority, remove {Walk, PublicWork, Construction, Unemployment}. (Note that many columns are perfectly collineared, in which case one column should be deleted.)
+```{r}
+census.clean <- census %>% 
+  filter(!is.na(census)) %>%
+  mutate(Men=(Men/TotalPop)*100) %>%
+  mutate(Employed=(Employed/TotalPop)*100) %>%
+  mutate(VotingAgeCitizen=(VotingAgeCitizen/TotalPop)*100) %>%
+  mutate(Minority=Hispanic+Black+Native+Asian+Pacific) %>%
+  dplyr::select(-Hispanic, -Black, -Native, -Asian, -Pacific, -Walk, 
+                -PublicWork, -Construction, -Unemployment, -Women)
+```
+We are removing Women from the dataset because it is perfectly collineared with Men and TotalPop.
+
+### 10. (1 pts) Print the first 5 rows of census.clean 
+```{r}
+head(census.clean, 5)
+```
+# Dimensionality Reduction
+
+### 11. Run PCA for the cleaned county level census data (with State and County excluded). (2 pts) Save the first two principle components PC1 and PC2 into a two-column data frame, call it pc.county. (2 pts) Discuss whether you chose to center and scale the features before running PCA and the reasons for your choice. (2 pts) What are the three features with the largest absolute values of the first principal component? (2 pts) Which features have opposite signs and what does that mean about the correlation between these features?
+
+Before we perform PCA, we check the variances of the variables to determine whether scaling the variables is important.
+```{r, warning=FALSE}
+apply(census.clean, 2, var)
+```
+Noticing that some variables, such as Minority and Poverty, have much larger variances compared to smaller variances from Employed, it is best to scale the variables before performing PCA. We also choose to center the features first as a requirement of performing PCA, as the data matrix needs zero column means.
+
+```{r}
+pr.out=prcomp(census.clean[3:dim(census.clean)[2]], scale=TRUE, center = TRUE)
+pc.county = pr.out$x[,1:2]
+pc.county.load = pr.out$rotation[,1:2]
+highest = as.data.frame(pr.out$rotation)[1]
+
+highest<-cbind(var = rownames(highest),highest)
+highest[order(-abs(highest$PC1)),]
+```
+Listing the absolute loadings in descending order, we can see the top three features of the first principal component are WorkAtHome, SelfEmployed, and Poverty. The features that have opposite signs are WorkAtHome, SelfEmployed, Professional, Employed, White, FamilyWork, which have negative signs, and then VotingAgeCitizen, Transit, Men, and OtherTransp which are positive. The opposite signs indicate a negative correlation between the features, while strong values of variables with the same sign indicate that they are positively correlated. Variables with loadings closer to 0 are harder to interpret as the magnitude of correlation is weaker.
+
+
+### 12. (2 pts) Determine the number of minimum number of PCs needed to capture 90% of the variance for the analysis. (2 pts) Plot proportion of variance explained (PVE) and cumulative PVE.
+```{r} 
+ve =pr.out$sdev^2 # variance explained
+pve=ve/sum(ve) #proportion variance explained
+cumsum(pve)
+```
+By adding the contribution to variance from each principle component, we can find that there are 12 principle components necessary to capture 90% of the variance for the analysis.
+```{r, echo = FALSE}
+plot(pve, main = "Variance Explained by Principal Components", xlab="Principal Component", ylab="Proportion of Variance Explained ", ylim=c(0,0.1),type='b')
+
+plot(cumsum(pve), xlab="Principal Component ", main = "Cumulative Variance Explained by Principal Components", ylab=" Cumulative Proportion of Variance Explained ", ylim=c(0,1), type='b')
+```
+
+# Clustering
+
+### 13. (2 pts) With census.clean (with State and County excluded), perform hierarchical clustering with complete linkage.
+```{r}
+set.seed(123)
+census.hcdata = census.clean[3:dim(census.clean)[2]] %>% 
+  scale(center = TRUE, scale = TRUE)
+census.dist = dist(census.hcdata)
+census.hclust = hclust(census.dist)
+
+dend10 = as.dendrogram(census.hclust) #convert to dend
+dend10 = color_branches(dend10, k =20) # coloring
+dend10 = color_labels(dend10, k=20)
+dend10 = set(dend10, "labels_cex", 0.05) # shrink labels
+dend10 = set_labels(dend10, labels = census.clean$County[order.dendrogram(dend10)])
+plot(dend10, horiz = T, main = "10 Cluster Census Hierarchical Clustering Dendrogram")
+```
+With complete linkage, we result in the dendrogram above. With many observations, it is difficult to read the county names without opening the file in a separate program. 
+
+```{r, echo = FALSE, message=FALSE}
+pdf("dendfile.pdf", width=40, height=15)
+plot(dend10, horiz = T, main = "10 Cluster Census Hierarchical Clustering Dendrogram")
+invisible(dev.off())
+```
+
+### Re-run the hierarchical clustering algorithm using the first 2 principal components from pc.county as inputs instead of the original features. (2 pts) Compare the results and comment on your observations. For both approaches investigate the cluster that contains Santa Barbara County. (2 pts) Which approach seemed to put Santa Barbara County in a more appropriate clusters? Comment on what you observe and discuss possible explanations for these observations.
+
+```{r}
+rr = dist(pc.county)
+rr.hclust = hclust(rr)
+
+dendRR = as.dendrogram(rr.hclust) #convert to dend
+dendRR = color_branches(dendRR, k =10) # coloring
+dendRR = color_labels(dendRR, k=10)
+dendRR = set(dendRR, "labels_cex", 0.1) # shrink labels
+dendRR = set_labels(dendRR, labels = census.clean$County[order.dendrogram(dendRR)])
+plot(dendRR, horiz = T, main = "10 Cluster pc.county Hierarchical Clustering Dendrogram")
+
+```
+This new dendrogram has more visible colours, indicating that there are less narrow clusters with few members. The range of height in the chart is also smaller, indicating that there is less dissimilarity between branches of the dendrogram.
+```{r, echo = FALSE, eval = FALSE}
+pdf("dendRRfile.pdf", width=40, height=15)
+plot(dendRR, horiz = T, main = "10 Cluster pc.county Hierarchical Clustering Dendrogram")
+dev.off()
+```
+
+Utilizing the cut clustering, we can identify the cluster that a county such as Santa Barbara county belongs in. Once we do that, we can find the set of all counties in the cluster and assess how spread the cluster is by calculating variance (after scaling). We do this for both the clusters using original census data as well as the principal component scores for PC1 and PC2.
+```{r cluster distance}
+census.cut = cutree(census.hclust, 10)
+census.cut[census.clean$County=='Santa Barbara County'] #cluster SBC belongs in
+censuscluster = census.clean[census.cut == 1,][3:22] %>% scale(center = FALSE, scale = TRUE)
+censusstats= apply(censuscluster, 2, sd)^2
+censusstats
+```
+```{r cluster distance pc}
+rr.cut = cutree(rr.hclust, 10)
+rr.cut[census.clean$County=='Santa Barbara County'] #cluster SBC belongs in
+rrcluster = census.clean[rr.cut == 4,][3:22] %>% scale(center = FALSE, scale = TRUE)
+rrstats= apply(rrcluster, 2, sd)^2
+rrstats
+```
+From cursory examination of each of these variables, we can see how some of statistics for variables such as Poverty, WorkAtHome, and Minority are lower for the pc.county data than for the census.clean data, but not the majority of the variables. However if we sum the variances the data shows that the pc.county data has less total variance from these variables. This would indicate that the pc.county dataset did a better job for the cluster that contains Santa Barbara County. It is important to note, however, that this is just one method to assessing spread, and the values are relatively close. On the other hand, we previously identified these three variables as those that contributed most to the variance in the first principal component. Thus reducing the variances of these variables might have a more considerable effect to effective clustering. 
+
+```{r}
+sum(censusstats)
+sum(rrstats)
+```
+
+# Modeling
+
+In order to build classification models, we first need to combine education and census.clean data (and removing all NAs), which can be achieved using the following code.
+``` {r modeling}
+# we join the two datasets
+all <- census.clean %>%
+  left_join(education, by = c("State"="State", "County"="County")) %>% 
+  na.omit
+```
+
+### 14. (4 pts) Transform the variable Poverty into a binary categorical variable with two levels: 1 if Poverty is greater than 20, and 0 if Poverty is smaller than or equal to 20. Remove features that you think are uninformative in classfication tasks.
+```{r}
+all = all[3:27] %>% mutate(
+  Poverty=as.factor(ifelse(Poverty >20, "1", "0")))
+
+all <- all %>% 
+  dplyr::select(-TotalPop, -TotalPopulation)
+
+```
+We decided to remove State, County, and Total Population features for best model accuracy because all 3 of these features will not help in indicating whether or not poverty levels are high or low.
+
+#### We partition the dataset into 80% training and 20% test data and create 10 cross-validation folds:
+
+```{r}
+set.seed(123) 
+n <- nrow(all)
+idx.tr <- sample.int(n, 0.8*n) 
+all.tr <- all[idx.tr, ]
+all.te <- all[-idx.tr, ]
+
+set.seed(123) 
+nfold <- 10
+folds <- sample(cut(1:nrow(all.tr), breaks=nfold, labels=FALSE))
+```
+
+#### The following code establishes an error rate function for classification and a records matrix to store our calculated error rates for reference.
+
+```{r}
+calc_error_rate = function(predicted.value, true.value){
+  return(mean(true.value!=predicted.value))  }
+
+records = matrix(NA, nrow=3, ncol=2)
+colnames(records) = c("train.error","test.error")
+rownames(records) = c("tree","logistic","LASSO")
+```
+
+# Classification
+
+### 15. Decision tree: (2 pts) train a decision tree by cv.tree(). (2 pts) Prune tree to minimize misclassification error. Be sure to use the folds from above for cross-validation. (2 pts) Visualize the trees before and after pruning. (1 pts) Save training and test errors to records object. (2 pts) Interpret and discuss the results of the decision tree analysis. (2 pts) Use this plot to tell a story about poverty.
+```{r, echo = FALSE}
+colnames(all.tr) =c(colnames(all.tr)[1:19],'LessHSDiploma','HSDiploma','Degree','Bachelors','TotalPopulation')
+colnames(all.te) =c(colnames(all.te)[1:19],'LessHSDiploma','HSDiploma','Degree','Bachelors','TotalPopulation')
+#fixing column names to prevent errors
+```
+
+```{r}
+dtree = tree(Poverty~., data = all.tr)
+draw.tree(dtree, nodeinfo=TRUE, cex = 0.7)
+title("Unpruned Classification Tree Built on Training Set")
+```
+
+```{r}
+cv = cv.tree(dtree, FUN=prune.misclass, K=folds)
+best_size = min(cv$size[cv$dev == min(cv$dev)])
+
+pt.cv = prune.misclass(dtree, best=best_size) # Plot pruned tree
+
+draw.tree(pt.cv, nodeinfo=TRUE, cex = 1)
+title("Pruned Classification Tree Built on Training Set")
+```
+We then use the tree to make predictions for the training and test sets, and calculate error rates.
+```{r error calculations}
+dtree.train.pred = predict(dtree, all.tr)
+dtree.train.pred2= ifelse(dtree.train.pred[,2] <=0.5, "0", "1")
+records[1,1]= calc_error_rate(dtree.train.pred2, all.tr$Poverty)
+
+dtree.test.pred = predict(dtree, all.te)
+dtree.test.pred2= ifelse(dtree.test.pred[,2] <=0.5, "0", "1")
+
+records[1,2]= calc_error_rate(dtree.test.pred2, all.te$Poverty)
+```
+
+Prior to pruning the decision tree, we had 8 terminal nodes that branched into White and OtherTransportation respectively, and ended up with 3 terminal nodes after. From the graph, it is observed that counties with more employed citizens are less likely to experience higher poverty levels compared to counties with less employed citizens. In addition, for counties with more employed citizens, a higher white population indicates that the county is not at risk of higher poverty levels compared to counties with more minorities. This is an important observation that highlights the imbalanced socioeconomic levels that marginalized communities face in America.
+
+
+### 16. (2 pts) Run a logistic regression to predict Poverty in each county. (1 pts) Save training and test errors to records variable. (1 pts) What are the significant variables? (1 pts) Are they consistent with what you saw in decision tree analysis? (2 pts) Interpret the meaning of a couple of the significant coefficients in terms of a unit change in the variables.
+```{r}
+logreg.model = glm(formula = Poverty~., family = binomial, 
+              data = all.tr)
+summary(logreg.model)
+```
+```{r logistic error calc}
+logreg.train.pred = predict(logreg.model, all.tr, type="response")
+logreg.train.pred2= ifelse(logreg.train.pred <=0.5, "0", "1")
+
+records[2,1]= calc_error_rate(logreg.train.pred2, all.tr$Poverty)
+
+logreg.test.pred = predict(logreg.model, all.te, type="response")
+logreg.test.pred2= ifelse(logreg.test.pred <=0.5, "0", "1")
+
+records[2,2]= calc_error_rate(logreg.test.pred2, all.te$Poverty)
+```
+The significant variables include Men, Production, WorkAtHome, Employed, and Less than a High School Diploma, 2015-19. While Employed is considered to be a significant variable in both the decision tree and logistic regression model, it is noted that in the logistic regression model, the White variable is highly insignificant. Men seems to be a significant variable in both models too, but only prior to pruning the decision tree. A unit change in Men would result in a unit decrease of 0.327 in the logit of Poverty, whereas a unit change in Production would result in a unit increase of 0.0949 in the logit of Poverty.
+
+
+### 17. Control overfitting by using regularization
+
+### (3 pts) Use the cv.glmnet function from the glmnet library to run a 10-fold cross validation and select the best regularization parameter for the logistic regression with LASSO penalty. Set lambda = seq(1, 20) * 1e-5 in cv.glmnet() function to set pre-defined candidate values for the tuning parameter $\lambda$.
+
+```{r}
+set.seed(123)
+
+# test & train matrices
+x_train <- model.matrix(Poverty~., data = all.tr)
+x_test <- model.matrix(Poverty~., data = all.te)
+
+cv.out.LASSO = cv.glmnet(x_train, all.tr$Poverty, alpha = 1, 
+                         nfolds=10,lambda = seq(1, 20) * 1e-5, family = 'binomial')
+bestlas = cv.out.LASSO$lambda.min
+```
+
+### (1 pts) What is the optimal value of $\lambda$ in cross validation? (1 pts) What are the non-zero coefficients in the LASSO regression for the optimal value of $\lambda$? (1 pts) How do they compare to the unpenalized logistic regression? (1 pts) Comment on the comparison. (1 pts) Save training and test errors to the records variable.
+
+Using 10 fold cross validation, we obtain the best lambda parameter in LASSO regularization to be `r bestlas`.
+```{r}
+set.seed(123)
+LASSO_mod = glmnet(x_train, all.tr$Poverty, alpha = 1, lambda = seq(1, 20) * 1e-5, 
+                   family = 'binomial')
+predict(LASSO_mod,type="coefficients",s=bestlas) #predict using bestlas
+```
+
+Using the optimal value of lambda, we find that all the coefficients in the LASSO regression model are non-zero. The coefficients of the unpenalized logistic regression model and the LASSO regression model seem to be roughly the same.
+```{r}
+LASSO.train.pred = predict(LASSO_mod, s=bestlas, newx=x_train,type = 'response')
+LASSO.train.pred2 = ifelse(LASSO.train.pred <= 0.5, "0", "1")
+
+LASSO.test.pred = predict(LASSO_mod, s=bestlas, newx=x_test,type = 'response')
+LASSO.test.pred2= ifelse(LASSO.test.pred <=0.5, "0", "1")
+
+records[3,1] <- mean(LASSO.train.pred2 != all.tr$Poverty)
+records[3,2] <- mean(LASSO.test.pred2 != all.te$Poverty)
+```
+
+### 18. (6 pts) Compute ROC curves for the decision tree, logistic regression and LASSO logistic regression using predictions on the test data. Display them on the same plot. (2 pts) Based on your classification results, discuss the pros and cons of the various methods. (2 pts) Are the different classifiers more appropriate for answering different kinds of questions about Poverty?
+
+```{r ROC curve}
+# Decision Tree
+dtree.train.pred2 = ifelse(dtree.train.pred <= 0.5, "0", "1")
+dtree.test.pred2 = ifelse(dtree.test.pred <= 0.5, "0", "1")
+
+predtree = prediction(dtree.test.pred[,2], all.te$Poverty)
+perftree = performance(predtree, measure="tpr", x.measure="fpr")
+
+# Logistic Regression
+predreg = prediction(as.numeric(logreg.test.pred), as.numeric(all.te$Poverty))
+perfreg = performance(predreg, measure="tpr", x.measure="fpr")
+
+# LASSO Regression
+predlas = prediction(LASSO.test.pred, all.te$Poverty)
+perflas = performance(predlas, measure="tpr", x.measure="fpr")
+
+plot(perftree, col=2, lwd=1, main="ROC curve")
+plot(perfreg, col=3, lwd=1, add=T)
+plot(perflas, col=4, lwd=1, add=T)
+
+abline(0,1)
+legend(x = "bottomright",          # Position
+       legend = c("Decision Tree", "Logistic Reg.","Lasso Reg."),  # Legend texts
+       col = c(2, 3, 4),           # Line colors
+       lwd = 1)                 # Line width
+```
+```{r}
+aucs = data.frame(matrix(NA, nrow = 1, ncol = 3))
+colnames(aucs) = c("Decision Tree", "Logistic Reg.","Lasso Reg.")
+aucs[1] = performance(predtree, "auc")@y.values
+aucs[2] = performance(predreg, "auc")@y.values
+aucs[3] = performance(predlas, "auc")@y.values
+
+aucs
+```
+From the table above, the pros of using either the logistic regression model or LASSO regression model is that it they both have the highest AUC score relative to the decision tree model, although the difference is not extremely significant. Despite having the lowest AUC score, a pro of using the decision tree model is that it is much more easy to interpret when looking for significant variables. Its biggest con is that this model would not be as accurate for classification. LASSO regression models can be helpful in making better predictions since it allows us to regularize coefficients that could avoid overfitting as well as feature selection, and the same can be said about logistic regression models in terms of avoiding overfitting in addition to how incredibly easy they are to implement and interpret. However, the cons of using a both the logistic regression and LASSO model is that they both assume linearity between predictor values and the response. 
+
+Given the relatively high AUC scores between all 3 models, it is difficult to say whether one is more appropriate of answering different questions regarding Poverty. The scope of the questions would need to be more clearly defined given how strong all the models are. However, it is safe to say that for this specific classification problem, either the Logistic Regression model or LASSO model is preferred. 
+
+
+# Taking it further
+
+### 19. Exploring Additional Classification Methods
+### K Nearest Neighbors
+```{r}
+YTrain = all.tr$Poverty
+XTrain = all.tr %>% dplyr::select(-Poverty) %>% scale(center = TRUE, scale = TRUE)
+
+YTest = all.te$Poverty
+XTest = all.te %>% dplyr::select(-Poverty) %>% scale(center = TRUE, scale = TRUE)
+
+```
+
+We will use Leave-One-Out-Cross-Validation to determine the best number of neighbors in k-nearest neighbors classification. The following chart describes the validation error received from using cross validation:
+
+```{r}
+set.seed(123)
+allK = 1:100
+validation.error = rep(NA, 100) #create empty list to populate with errors
+
+for (i in allK){
+  pred.Yval = knn.cv(train=XTrain, cl=YTrain, k=i)
+  validation.error[i] = mean(pred.Yval != YTrain)
+  }
+
+plot(allK, validation.error, type = "l", xlab = "k", main ='Validation Error for k Neighbors in k-NN Classification')
+abline (h = 0.139, col = 3, lty = 2) #low line
+
+numneighbor = max(allK[validation.error == min(validation.error)])
+
+```
+
+This chart shows us the validation error from using models with various numbers of nearest neighbors used in kNN, and so we can see we get the minimal validation error using `r numneighbor` nearest neighbors. Once we have this number, we can then produce predictions for values using the training and test datasets.
+
+```{r}
+set.seed(123)
+
+pred.YTrain = knn(train=XTrain, test=XTrain, cl=YTrain, k=numneighbor, prob = TRUE)
+pred.YTest = knn(train=XTrain, test=XTest, cl=YTrain, k=numneighbor, prob = TRUE)
+
+calc_error_rate(pred.YTrain,YTrain)
+calc_error_rate(pred.YTest,YTest)
+
+predknn = prediction((1-attributes(pred.YTest)$prob), as.numeric(YTest))
+perfknn = performance(predknn, measure="tpr", x.measure="fpr")
+```
+
+### Random Forests
+We will also consider the Random Forests implementation of classification. In this we will use 4 variables in each split.
+```{r}
+set.seed(123)
+rf.model = randomForest(all.tr$Poverty ~ ., data=all.tr, mtyr=4,importance=TRUE)
+
+rf.prediction_tr = predict(rf.model, all.tr, type = "prob")
+rf.prediction = predict(rf.model, all.te, type = "prob")
+
+predrf = prediction(as.numeric(rf.prediction[,2]), all.te$Poverty)
+perfrf = performance(predrf, measure="tpr", x.measure="fpr")
+
+rf.prediction_tr = ifelse(rf.prediction_tr[,2] <= 0.5, "0", "1")
+rf.prediction = ifelse(rf.prediction[,2] <= 0.5, "0", "1")
+
+calc_error_rate((rf.prediction_tr),all.tr$Poverty)
+calc_error_rate(rf.prediction,all.te$Poverty)
+```
+We get a perfect `r calc_error_rate((rf.prediction_tr),all.tr$Poverty)` error rate for the training set and a more expected `r calc_error_rate(rf.prediction,all.te$Poverty)` error rate for the test set. This tells us that this classification model did the best at predicting values for the training data but will of course not be perfect for new untrained data. We will now plot the ROC curve to compare the effectiveness of these classification models to the previous three we considered.
+
+
+```{r Plotting ROC comparison 2}
+plot(perfknn, col=2, lwd=3, main="ROC curves")
+plot(perfrf, col=3, lwd=3, add =T)
+plot(perftree, col=4, lwd=1, lty = 2, add = T)
+plot(perfreg, col=5, lwd=1, lty = 2, add=T)
+plot(perflas, col=6, lwd=1, lty = 2, add=T)
+
+abline(0,1)
+legend(x = "bottomright",          # Position
+       legend = c("KNN", "Random Forest","Decision Tree", "Logistic Reg.","Lasso Reg."),  # Legend texts
+       col = c(2, 3, 4, 5, 6),           # Line colors
+       lwd = c(3,3,1,1,1),               # Line width
+       lty = c(1,1,2,2,2))               # Line style
+
+```
+
+```{r calculating area under curves}
+aucs = data.frame(matrix(NA, nrow = 1, ncol = 5))
+colnames(aucs) = c("Decision Tree", "Logistic Reg.","Lasso Reg.", "KNN", "Random Forest")
+aucs[1] = performance(predtree, "auc")@y.values
+aucs[2] = performance(predreg, "auc")@y.values
+aucs[3] = performance(predlas, "auc")@y.values
+aucs[4] = performance(predknn, "auc")@y.values
+aucs[5] = performance(predrf, "auc")@y.values
+aucs
+
+```
+
+In reviewing the ROC curves for these two new classification methods, we can see from the test errors, ROC, and area under the ROC curve how the random forest model shows improvements over the other models and the KNN model shows inferiority. The random forest model obtains a test error quite lower than other models, and in the ROC curve somewhat competes with the LASSO and logistic regression methods until the false positive rate reaches 0.2, in which the random forest model performs with higher true positive rate. In contrast, the KNN model performed worse than any of the other models across the graph, though its test error was better than the decision tree model's. It is still important to note that some of the "worse" performing models still may be valuable. As a non-parametric method, kNN does not need to rely on some assumptions about the distribution of the data, though the non-parametric random forests perform better. The pruned decision tree returns a highly interpretable model as well. Instead of choosing LASSO or logistic regression, we would now recommend using random forests to model the poverty data.
+
+### 20. Regression Approach
+
+In this section we will use regression instead of classification and compare the results of the regression among three different models as well as compare these results to those from classification.
+
+```{r regression records}
+#Use this to keep track of MSE's
+records.mse = matrix(NA, nrow=3, ncol=2)
+colnames(records.mse) = c("training MSE","test MSE")
+rownames(records.mse) = c("linear","LASSO","forests")
+```
+
+```{r establish new regression data, poverty unmutated}
+reg = census.clean %>%
+  left_join(education, by = c("State"="State", "County"="County")) %>% 
+  na.omit
+reg <- reg[3:dim(reg)[2]] %>% 
+  dplyr::select(-TotalPop, -TotalPopulation)
+colnames(reg) =c(colnames(reg)[1:19],'LessHSDiploma','HSDiploma','Degree','Bachelors')
+
+set.seed(123) 
+n <- nrow(reg)
+idx.tr <- sample.int(n, 0.8*n) 
+reg.tr <- reg[idx.tr, ]
+reg.te <- reg[-idx.tr, ]
+```
+
+### Linear Regression
+Since we are not doing classification, standard linear regression can still be done. We report the coefficients in the model, and will calculate the errors to be reported later.
+
+```{r linear regression }
+reg.lm = lm(formula = Poverty~., data = reg.tr)
+summary(reg.lm)
+```
+
+```{r lm error calc}
+reg.lm.train.pred = predict(reg.lm, reg.tr, type="response")
+records.mse[1,1] = mean((reg.lm.train.pred - reg.tr$Poverty)^2)
+
+reg.lm.test.pred = predict(reg.lm, reg.te, type="response")
+records.mse[1,2] = mean((reg.lm.test.pred - reg.te$Poverty)^2)
+```
+
+### Lasso Regression
+We use the same parameters (list of lambdas, cross validation folds) to perform Lasso regression to attempt to mitigate overfitting.
+```{r LASSO data, bestlambda}
+xlas.tr = model.matrix(Poverty~., data = reg.tr)[,-1]
+xlas.te = model.matrix(Poverty~., data = reg.te)[,-1]
+
+cv.out.LASSO = cv.glmnet(xlas.tr, reg.tr$Poverty, alpha = 1, nfolds = 10, lambda = (seq(1, 20) * 1e-5))
+reglambda = cv.out.LASSO$lambda.min
+```
+This LASSO selects best LASSO lambda parameter to be `r reglambda`. Using this, we will fit the model using this parameter and make predictions from the model.
+```{r reg LASSO coefficients}
+LASSOreg = glmnet(xlas.tr, reg.tr$Poverty, alpha = 1, lambda = (seq(1, 20) * 1e-5))
+predict(LASSOreg,type="coefficients",s=reglambda)
+```
+
+```{r LASSO reg new predictions; mse record}
+LASSOreg.train.pred = predict(LASSOreg, s=reglambda, newx=xlas.tr)
+records.mse[2,1]= mean((LASSOreg.train.pred - reg.tr$Poverty)^2)
+
+LASSOreg.test.pred = predict(LASSOreg,s=reglambda,newx=xlas.te)
+records.mse[2,2]= mean((LASSOreg.test.pred - reg.te$Poverty)^2)
+```
+
+### Random Forests
+Lastly, we will use Random Forests to fit a regression model to the data. Although the function calculates it automatically for regression, it is important to note that the number of predictors considered at each split will be seven, the 22 predictors divided by three.
+
+```{r forest full run}
+forest.reg = randomForest(reg.tr$Poverty~., data = reg.tr)
+forest.reg
+```
+
+```{r} 
+forestreg.train.pred = predict(forest.reg, newdata=reg.tr)
+records.mse[3,1]= mean((forestreg.train.pred - reg.tr$Poverty)^2)
+
+forestreg.test.pred = predict(forest.reg,newdata=reg.te)
+records.mse[3,2]= mean((forestreg.test.pred - reg.te$Poverty)^2)
+records.mse
+```
+With our regression test mean squares error, we result in the linear and LASSO models being rather identical, with the random forests implementation surpassing the other models. In context of the previous classification results with Random Forests, both types of analyses resulted in minimal test MSE with the Random Forests approach. We had already seen Random Forest perform well for the classification perspective, and so it was expected that it would handle regression well. For regression perspectives, we would suggest that Random Forests would still predict Poverty the best.
+
+### Classification vs Regression
+
+The most concrete difference between using classification and regression will be the output: In classification we receive a discrete (in this case binary) result of Poverty/Not Poverty, while in regression we will obtain a continuous result, the Poverty value. If our response to data is also binary (give aid vs do not give aid), then classification can serve fine. In fact, we can still use the regression results and convert it to a binary variable afterwards. But if we wanted to implement different programs dependent on severity of Poverty derived from the Poverty value, then the binary classification would not work to give more than two levels of treatment.
+
+In terms of this project, if we interpret binary classifiers from the regression solution, we get both better and poorer test error results dependent on the type of model.
+```{r comparison}
+#Random Forests
+forest_convert = ifelse(forestreg.test.pred >20, "1", "0")
+calc_error_rate(forest_convert, all.te$Poverty);calc_error_rate(rf.prediction,all.te$Poverty)
+```
+
+```{r}
+#Lasso
+LASSO_convert = ifelse(LASSOreg.test.pred >20, "1", "0")
+calc_error_rate(LASSO_convert, all.te$Poverty);calc_error_rate(LASSO.test.pred2,all.te$Poverty)
+```
+
+
+### 21. Conclusions
+
+Poverty in America is an issue that has been looked at for many years. Through statistical methods and developments in Machine Learning techniques, it is becoming easier for people to access, analyze, and interpret data just like we did for this project that could bring forth questions and answers to pressing issues that needs to be addressed. 
+
+To begin with, the datasets given to us were all fairly simple to work with--there weren't many missing values, and most of the cleaning included adding new features, combining variables, and removing unwanted columns. While data cleaning is a process that can be overlooked at sometimes, it is arguably the most important step during the entire process because missing values and unwanted features would severly impact the accuracy of our training/testing models and overall result in the future. Data visualization is also important tool that we utilized to provide a visual aid of the data to help us understand what we were working with. 
+
+Running our cleaned data through various classification methods showed interesting observations. Each classification method provided variables that were more significant in predicting poverty. For example, the decision tree model (after pruning) determined that Employment rates in a county were one of the biggest indicators of poverty levels. In addition, White Americans in counties with higher employment rates tend to experience lower levels of poverty compared to their minority counterparts. This observation, one that was incredibly easy to read and interpret, paints an important picture of the reality that Americans live in today. Re-visiting this question through the logistic regression model yields somewhat more of a different result--the logistic regression model places heavy emphasis on multiple variables that it thinks is signficiant in predicting the response variable (poverty). These included, but are not limited to, Men, Employed, and Less than a High School Diploma, 2015-19. Many of the significant features that were indentified makes sense on the surface level: higher levels of employment and men in counties generally mean that poverty levels would be lower, and counties where its education level consists of mostly less than a high school education, poverty levels would be higher. An interesting observation is that the logistic regression model did not classify White to be a significant feature at all, placing more emphasis on other features. The LASSO regression model yield similar results, as seen in both their training and test errors.
+
+Let's take a closer look at the 5 main classifiers used in our project:
+```{r}
+barplot(t(aucs),
+        main="AUC of Classification Methods",
+        horiz=F,
+        beside=T,
+        names.arg=colnames(aucs),
+        space=1,
+        width=c(10,10,10,10,10),
+        ylim=c(0,1))
+```
+To sum, the Area Under the Curve (AUC) is the measure of the ability of a classifier to distinguish between classes and is used as a summary of the ROC curve. In the bar chart above, we can see that all 5 of our classifiers have a relatively high AUC score, the lowest of 0.8197 from the KNN model and the highest of 0.929 from the Random Forest model. This means that our champion model, the Random Forest model, can classify whether a county is experiencing poverty (based on a benchmark we established earlier) at an accuracy of 92.9%. It is also worth mentioning that the Random Forest classifier achieved a training error of 0, perfectly classifying poverty levels in training sets and achieving the lowest testing error of 0.1168 amongst all other classifiers. 
+```{r, echo = FALSE}
+all_records = matrix(NA, nrow=5, ncol=2)
+colnames(all_records) = c("train.error","test.error")
+rownames(all_records) = c("Decision Tree","Logistic Reg.","Lasso Reg.", "KNN", "Random Forest")
+
+all_records[1,1]= calc_error_rate(dtree.train.pred2, all.tr$Poverty)
+all_records[1,2]= calc_error_rate(dtree.test.pred2, all.te$Poverty)
+all_records[2,1]= calc_error_rate(logreg.train.pred2, all.tr$Poverty)
+all_records[2,2]= calc_error_rate(logreg.test.pred2, all.te$Poverty)
+all_records[3,1] <- mean(LASSO.train.pred2 != all.tr$Poverty)
+all_records[3,2] <- mean(LASSO.test.pred2 != all.te$Poverty)
+all_records[4,1] <- calc_error_rate(pred.YTrain,YTrain)
+all_records[4,2] <- calc_error_rate(pred.YTest,YTest)
+all_records[5,1] <- calc_error_rate((rf.prediction_tr),all.tr$Poverty)
+all_records[5,2] <- calc_error_rate(rf.prediction,all.te$Poverty)
+all_records
+```
+
+Among the three assigned classifiers used in our project, the logistic regression and LASSO model both achieved extremely similar AUC scores of 0.9078 and 0.9081 respectively. This trend continues as we examine the training and test error for both models--again, both models achieved similar scores, where the logistic regression had a training/test error of 0.1326 and 0.1312, while the LASSO model had a training/test error of 0.1338 and 0.1328. Given that both models have similar training/test errors and AUC scores, it is hard to say which model might be better. Going purely of test error rates, the logistic regression has a slight edge, but in terms of AUC scores, LASSO regression is slightly better. The choice of model would be better discussed if there were a difference in the number of features to analyze, and how much we want to emphasize interpretability. 
+
+While our classifiers performed fairly well given the data we worked with, we believe that better classifications and predictions can be computed. For example, factors such as food security, discrimination levels, infrastructure, and more can all play a big impact on poverty in counties throughout America. While the dataset that was given to us worked fine, additional information on the county level would allow us to have more insight on what features could affect poverty and potentially use that information to create a more accurate classifier. 
+
+
+
+
+
+
